@@ -143,4 +143,12 @@ def call_llm_api(prompt: str) -> str:
         raise
 
 
+if __name__ == "__main__":
+    # This block runs only when the script is executed directly (e.g., `python summarization_service.py`)
+    # It starts the summarization process for a transcript with ID "xyz"
+    # and logs the final error if all retry attempts fail.
+    try:
+        summarize_transcript("xyz")
+    except Exception as e:
+        logger.error(f"Final error after retries: {e}")
 
