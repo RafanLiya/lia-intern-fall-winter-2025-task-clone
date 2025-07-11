@@ -1,1 +1,2 @@
 python-dotenv
+tenacity>=8.0.1

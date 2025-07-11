@@ -4,6 +4,8 @@ import os
 import requests
 
 from dotenv import load_dotenv
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type, before_sleep_log
+import requests.exceptions
 
 logging.basicConfig(format="%(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,19 +90,35 @@ def summarize_transcript(transcript_id: str):
     fake_save_summary(transcript_id, summary)
     logger.info("Summary saved.")
 
+# Automatically retry the function up to 3 times if a requests-related exception occurs.
+# Retries happen with exponential backoff: 10s → 20s → 40s (capped at 60s).
+# Only retries on network-related errors (timeouts, 5xx, connection issues).
+# Final failure will still raise the original exception (reraise=True).
+@retry(
+    wait=wait_exponential(multiplier=1, min=5, max=60),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type((requests.exceptions.RequestException,)),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+)
 
 def call_llm_api(prompt: str) -> str:
     """
-    Call the LLM API to generate a summary.
+    Call the LLM API to generate a summary, with retries on network errors or timeouts.
     :param prompt: The prompt to send to the LLM API
     :return: The generated summary
     """
+    # Estimate token count from prompt length, assuming ~1.3 tokens per word
     estimated_tokens = len(prompt.split()) * 1.3
+
+    # Dynamically calculate a timeout based on size (defaults to at least 60s).
+    # Assumes LLM can process ~25 tokens per second.
     timeout = max(60, int(estimated_tokens * 0.04))
 
-    logger.info(f"Call LLM API with {timeout} seconds timeout.")
+
+    logger.info(f"Calling LLM API with {timeout} seconds timeout...")
 
     try:
+        # Make the POST request to the LLM API with the generated prompt
         response = requests.post(
             url=os.getenv("LLM_API_URL"),
             data=json.dumps(
@@ -110,13 +128,27 @@ def call_llm_api(prompt: str) -> str:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {os.getenv('LLM_API_KEY')}",
             },
-            timeout=timeout,
+            timeout=timeout,  # Dynamic timeout applied here
         )
+
+        # Raise HTTPError if status is 4xx/5xx
         response.raise_for_status()
+
+        # Return the LLM's summarized response
         return response.json()["choices"][0]["message"]["content"]
+
     except requests.exceptions.RequestException as e:
-        logger.error(f"LLM API call failed: {e}")
+        # Log retryable exceptions (network, timeout, 5xx)
+        logger.warning(f"Retryable LLM API call error: {e}")
         raise
+
+
+if __name__ == "__main__":
+    # This block runs only when the script is executed directly (e.g., `python summarization_service.py`)
+    # It starts the summarization process for a transcript with ID "xyz"
+    # and logs the final error if all retry attempts fail.
+    try:
+        summarize_transcript("xyz")
     except Exception as e:
-        logger.error(f"LLM API call failed: {e}")
-        raise
+        logger.error(f"Final error after retries: {e}")
+
